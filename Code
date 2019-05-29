@@ -1,0 +1,111 @@
+from pulp import *
+import pandas as pd
+import numpy as np
+from sklearn import preprocessing
+import sklearn.cluster
+from scipy.spatial import distance
+from collections import Counter
+
+def Constrained_Clustering(base_data, clusters_count, Min_Size = 0, KMeans_max_iter = 500, initialization_count = 100):
+    
+    #Creating a copy of data
+    xdata = base_data.copy()
+    
+    #Filling empty values with 0
+    xdata = xdata.fillna(0)
+    
+    #Converting dataframe to matrix
+    xdata = xdata.values
+    
+    #Scaling the data
+    xdata = preprocessing.normalize(xdata, norm='l1', axis=0, copy=True, return_norm=False)
+    
+    #Clustering the Data
+    cluster_model = sklearn.cluster.KMeans(n_clusters = clusters_count, max_iter = KMeans_max_iter, 
+                                           init = "k-means++", n_init = initialization_count)
+    cluster_model.fit_predict(xdata)
+    centroids = cluster_model.cluster_centers_
+    
+    #MCF Code
+    MCF_Flag = 0
+    for key in dict(Counter(cluster_model.labels_)):
+        if(dict(Counter(cluster_model.labels_))[key] < Min_Size):
+            MCF_Flag = 1
+    if(MCF_Flag == 1):
+        
+        #LP variable
+        prob = LpProblem('Constrained Clustering', LpMinimize)
+        objective_equation = None
+        variables_dict = {}
+        variables = np.empty((clusters_count, len(xdata)), dtype = object)
+        
+        #Creating Nodes
+        for data_point in range(1,len(xdata)+1):
+            for k in range(1,clusters_count+1):
+                variables_dict['x{}{}'.format(data_point,k)] = LpVariable('x{}{}'.format(data_point,k), lowBound=0, cat="Integer")
+                variables[k-1][data_point-1] = variables_dict['x{}{}'.format(data_point,k)]
+                objective_equation += variables_dict['x{}{}'.format(data_point,k)] * distance.euclidean(xdata[data_point-1], centroids[k-1])
+        
+        #Adding Objective Function
+        prob += objective_equation 
+        
+        #Checking if the problem is balanced or not
+        if(len(xdata) != clusters_count * Min_Size):
+            dummy_node_variables = np.empty(len(xdata),dtype = object)
+            dummy_variables_dict = {}
+            
+            #Creating dummy variables for the unbalanced problem
+            for data_point in range(1, len(xdata) + 1):
+                dummy_variables_dict['x{}{}'.format(data_point,clusters_count+1)] = LpVariable('x{}{}'.format(data_point, clusters_count + 1),
+                                                                                               lowBound = 0, cat="Integer")
+                dummy_node_variables[data_point-1] = dummy_variables_dict['x{}{}'.format(data_point,clusters_count+1)]
+            variables = np.vstack([variables, dummy_node_variables])
+            
+            #Adding Demand nodes constraints
+            for k in range(clusters_count+1):
+                constraint_equation = None
+                for variable in variables[k]:
+                    constraint_equation += variable
+                if(k == clusters_count):
+                    prob += constraint_equation >= len(xdata) - (clusters_count * Min_Size)
+                else:   
+                    prob += constraint_equation >= Min_Size
+                    
+            #Adding Supply nodes constraints
+            for j in range(len(xdata)):
+                constraint_equation = None
+                for i in range(clusters_count+1):
+                    constraint_equation += variables[i][j]
+                prob += constraint_equation <= 1
+        else:
+            #Adding Demand nodes constraints
+            for k in range(clusters_count):
+                constraint_equation = None
+                for variable in variables[k]:
+                    constraint_equation += variable
+                prob += constraint_equation >= Min_Size
+            
+            #Adding Supply nodes constraints
+            for j in range(len(xdata)):
+                constraint_equation = None
+                for i in range(clusters_count):
+                    constraint_equation += variables[i][j]
+                prob += constraint_equation <= 1
+        
+        #Solving the problem
+        status = prob.solve()
+        Output = pd.DataFrame({'Data_Point' : np.array([x for x in range(len(xdata))]),
+                               'Cluster' : np.array(['NA' for x in range(len(xdata))])}, columns = ['Data_Point', 'Cluster'])
+        for i in range(len(xdata)):
+            for j in range(clusters_count + 1):
+                if(value(variables[j][i]) == 1):
+                    Output.iloc[i,1] = j
+
+        indices = []
+        for i in range(len(xdata)):
+            if(Output.loc[i, 'Cluster'] == clusters_count):
+                indices.append(i)
+        for i in indices:
+            Output.loc[i, 'Cluster'] = np.apply_along_axis(lambda centroid: 
+                            distance.euclidean(xdata[i], centroid), axis = 1, arr = centroids).argmin()
+        return Output.Cluster
